@@ -103,6 +103,38 @@ def get_client(live: bool):
     return _client
 
 
+def get_positions(client) -> List[dict]:
+    try:
+        from dataclasses import asdict
+
+        positions = client.get_positions(venue="polymarket")
+        return [asdict(p) for p in positions]
+    except Exception as e:
+        print(f"Error fetching positions: {e}")
+        return []
+
+
+def check_context_safeguards(context: dict):
+    if not context:
+        return True, []
+
+    reasons = []
+    warnings = context.get("warnings", [])
+    discipline = context.get("discipline", {})
+
+    for warning in warnings:
+        if "MARKET RESOLVED" in str(warning).upper():
+            return False, ["Market already resolved"]
+
+    warning_level = discipline.get("warning_level", "none")
+    if warning_level == "severe":
+        return False, [f"Severe flip-flop warning: {discipline.get('flip_flop_warning', '')}"]
+    if warning_level == "mild":
+        reasons.append("Mild flip-flop warning (proceed with caution)")
+
+    return True, reasons
+
+
 def parse_csv_floats(s: str) -> List[float]:
     vals = []
     for x in s.split(","):
@@ -172,8 +204,13 @@ def safe_spread(ctx: dict, market_obj) -> Optional[float]:
     return None
 
 
-def run(live: bool, quiet: bool = False) -> int:
+def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeguards: bool = True) -> int:
     client = get_client(live)
+
+    if positions_only:
+        print(json.dumps(get_positions(client), indent=2))
+        return 0
+
     spend = load_daily_spend()
     cooldown = load_json(COOLDOWN_PATH, {})
     tnow = now_utc().timestamp()
@@ -225,6 +262,12 @@ def run(live: bool, quiet: bool = False) -> int:
             continue
 
         ctx = client.get_market_context(mid, venue="polymarket") or {}
+        if use_safeguards:
+            should_trade, reasons = check_context_safeguards(ctx)
+            if not should_trade:
+                continue
+            if reasons and not quiet:
+                print(f"safeguard: {m.question[:64]}... -> {'; '.join(reasons)}")
         spread = safe_spread(ctx, m)
         slip = max_slippage_pct(ctx)
 
@@ -316,6 +359,8 @@ def run(live: bool, quiet: bool = False) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="World Cup player-goal value trader")
     ap.add_argument("--live", action="store_true", help="Place real orders")
+    ap.add_argument("--positions", action="store_true", help="Show current positions and exit")
+    ap.add_argument("--no-safeguards", action="store_true", help="Disable context safeguards")
     ap.add_argument("--quiet", action="store_true", help="Quiet output")
     ap.add_argument("--config", action="store_true", help="Print current config")
     ap.add_argument("--set", action="append", default=[], help="Update config key=value")
@@ -346,7 +391,12 @@ def main() -> int:
         print(json.dumps(_config, indent=2))
         return 0
 
-    return run(live=args.live, quiet=args.quiet)
+    return run(
+        live=args.live,
+        quiet=args.quiet,
+        positions_only=args.positions,
+        use_safeguards=not args.no_safeguards,
+    )
 
 
 if __name__ == "__main__":

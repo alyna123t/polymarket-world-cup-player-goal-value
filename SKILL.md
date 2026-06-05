@@ -67,3 +67,32 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
 - Uses conservative built-in priors for known players from the article and fallback priors for others.
 - Designed for low-liquidity conditions where market chasing is penalized.
 - Start in dry-run/sim and adjust priors after collecting your own outcomes.
+
+## Deterministic spec (Skill Builder style)
+
+### Signal
+- Player fair-value estimate from weighted priors:
+  - penalties, expected matches, minutes certainty, role centrality, mismatch upside
+
+### Entry logic
+- Require `fair_yes - market_yes >= min_edge`
+- Build discounted limit ladder below fair value
+- Enter only when spread/slippage/cooldown/budget gates pass
+
+### Exit logic
+- v0.1 focuses on disciplined entry only
+- Exit handling can be layered as explicit sell rules in future version
+
+### Market selection
+- Active Polymarket-imported World Cup “player to score at least one goal” markets
+
+### Position sizing
+- Fixed per-market cap `max_position_usd`
+- Ladder split from `limit_splits`
+
+### Risk controls
+- `max_spread`, `max_slippage_pct`
+- `cooldown_hours`
+- `max_trades_per_run`
+- `daily_budget_usd`
+- optional context safeguards (disable with `--no-safeguards`)
