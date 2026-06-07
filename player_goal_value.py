@@ -63,6 +63,7 @@ DEFAULT_PRIOR = {"penalties": 0.45, "expected_matches": 0.45, "minutes": 0.65, "
 WEIGHTS = {"penalties": 0.30, "expected_matches": 0.25, "minutes": 0.20, "role": 0.17, "mismatch": 0.08}
 
 _client = None
+VENUE_CHOICES = ("sim", "polymarket", "kalshi")
 
 
 def now_utc() -> datetime:
@@ -90,7 +91,7 @@ def load_daily_spend() -> dict:
     return data
 
 
-def get_client(live: bool):
+def get_client(live: bool, venue: str):
     global _client
     if _client is None:
         from simmer_sdk import SimmerClient
@@ -99,15 +100,15 @@ def get_client(live: bool):
         if not key:
             print("Error: SIMMER_API_KEY not set")
             sys.exit(1)
-        _client = SimmerClient(api_key=key, venue="polymarket", live=live)
+        _client = SimmerClient(api_key=key, venue=venue, live=live)
     return _client
 
 
-def get_positions(client) -> List[dict]:
+def get_positions(client, venue: str) -> List[dict]:
     try:
         from dataclasses import asdict
 
-        positions = client.get_positions(venue="polymarket")
+        positions = client.get_positions(venue=venue)
         return [asdict(p) for p in positions]
     except Exception as e:
         print(f"Error fetching positions: {e}")
@@ -204,11 +205,45 @@ def safe_spread(ctx: dict, market_obj) -> Optional[float]:
     return None
 
 
-def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeguards: bool = True) -> int:
-    client = get_client(live)
+def get_yes_ask(ctx: dict, market_obj) -> float:
+    m = (ctx or {}).get("market") or {}
+    keys = (
+        "yes_ask",
+        "ask_yes",
+        "best_ask_yes",
+        "ask",
+        "best_ask",
+    )
+    for key in keys:
+        try:
+            v = m.get(key, None)
+            if v is not None:
+                return float(v)
+        except Exception:
+            pass
+
+    for attr in ("yes_ask", "ask_yes", "best_ask_yes", "ask", "best_ask", "current_probability"):
+        try:
+            v = getattr(market_obj, attr, None)
+            if v is not None:
+                return float(v)
+        except Exception:
+            pass
+
+    return 0.5
+
+
+def run(
+    live: bool,
+    venue: str,
+    quiet: bool = False,
+    positions_only: bool = False,
+    use_safeguards: bool = True,
+) -> int:
+    client = get_client(live, venue)
 
     if positions_only:
-        print(json.dumps(get_positions(client), indent=2))
+        print(json.dumps(get_positions(client, venue), indent=2))
         return 0
 
     spend = load_daily_spend()
@@ -236,22 +271,18 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
     placed = []
     run_spent = 0.0
 
-    # rank by model edge
+    # rank by model fair value (final edge is computed against ask inside loop)
     scored = []
     for m in cands:
         player = extract_player_name(m.question)
         fair = estimate_fair_yes(player)
-        market_px = float(m.current_probability)
-        edge = fair - market_px
-        scored.append((edge, fair, player, m))
+        scored.append((fair, player, m))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    for edge, fair, player, m in scored:
+    for fair, player, m in scored:
         if len(placed) >= int(_config["max_trades_per_run"]):
             break
-        if edge < float(_config["min_edge"]):
-            continue
 
         if spend["spent"] + run_spent >= float(_config["daily_budget_usd"]):
             break
@@ -261,7 +292,12 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
         if tnow - last < float(_config["cooldown_hours"]) * 3600:
             continue
 
-        ctx = client.get_market_context(mid, venue="polymarket") or {}
+        ctx = client.get_market_context(mid, venue=venue) or {}
+        ask_yes = get_yes_ask(ctx, m)
+        edge = fair - ask_yes
+        if edge < float(_config["min_edge"]):
+            continue
+
         if use_safeguards:
             should_trade, reasons = check_context_safeguards(ctx)
             if not should_trade:
@@ -279,7 +315,7 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
         total = float(_config["max_position_usd"])
         rung_orders = []
         for off_c, split in zip(offsets, splits):
-            px = max(0.001, min(0.999, round(fair - (off_c / 100.0), 3)))
+            px = max(0.001, min(0.999, fair - (off_c / 100.0)))
             amt = round(total * split, 2)
             if amt < 1.0:
                 continue
@@ -301,7 +337,7 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
                     side="yes",
                     amount=amt,
                     action="buy",
-                    venue="polymarket",
+                    venue=venue,
                     order_type="GTC",
                     price=px,
                     reasoning=note,
@@ -311,7 +347,7 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
                     signal_data={
                         "player": player,
                         "fair_yes": round(fair, 5),
-                        "market_yes": round(float(m.current_probability), 5),
+                        "ask_yes": round(ask_yes, 5),
                         "edge": round(edge, 5),
                         "spread": None if spread is None else round(spread, 5),
                         "slippage_pct": round(slip, 5),
@@ -340,10 +376,11 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
         if any_ok:
             cooldown[mid] = tnow
 
-    spend["spent"] = round(float(spend["spent"]) + run_spent, 2)
-    spend["trades"] = int(spend.get("trades", 0)) + len(placed)
-    save_json(SPEND_PATH, spend)
-    save_json(COOLDOWN_PATH, cooldown)
+    if live:
+        spend["spent"] = round(float(spend["spent"]) + run_spent, 2)
+        spend["trades"] = int(spend.get("trades", 0)) + len(placed)
+        save_json(SPEND_PATH, spend)
+        save_json(COOLDOWN_PATH, cooldown)
 
     if placed:
         print(f"Placed {len(placed)} limit entries")
@@ -359,6 +396,7 @@ def run(live: bool, quiet: bool = False, positions_only: bool = False, use_safeg
 def main() -> int:
     ap = argparse.ArgumentParser(description="World Cup player-goal value trader")
     ap.add_argument("--live", action="store_true", help="Place real orders")
+    ap.add_argument("--venue", choices=VENUE_CHOICES, default="polymarket", help="Trading venue")
     ap.add_argument("--positions", action="store_true", help="Show current positions and exit")
     ap.add_argument("--no-safeguards", action="store_true", help="Disable context safeguards")
     ap.add_argument("--quiet", action="store_true", help="Quiet output")
@@ -393,6 +431,7 @@ def main() -> int:
 
     return run(
         live=args.live,
+        venue=args.venue,
         quiet=args.quiet,
         positions_only=args.positions,
         use_safeguards=not args.no_safeguards,
