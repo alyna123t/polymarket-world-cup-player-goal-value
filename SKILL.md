@@ -3,7 +3,7 @@ name: polymarket-world-cup-player-goal-value
 description: Trade FIFA World Cup “player to score at least once” markets using role/minutes/penalty/deep-run value scoring and patient limit orders.
 metadata:
   author: Alyna + Hermes
-  version: "0.1.0"
+  version: "0.1.1"
   displayName: Polymarket World Cup Player Goal Value
   difficulty: intermediate
 ---
@@ -26,12 +26,13 @@ https://x.com/Predicti0r/status/2061791808158400570
 
 ## What it does
 
-- Scans active World Cup player-goal markets on Polymarket imports
+- Scans active World Cup player-goal markets from Simmer imports
 - Computes model fair YES probability per player
-- Requires minimum edge (`fair - market_price >= min_edge`)
-- Applies spread/slippage quality gates
+- Uses **ask price** for edge checks (`fair - ask_yes >= min_edge`)
+- Applies spread/slippage quality gates + optional context safeguards
 - Places laddered limit orders (`GTC`) at discounted prices from fair
 - Enforces cooldown + daily budget controls
+- Supports `--venue` (`sim`, `polymarket`, `kalshi`) for testing and deployment
 
 ## Defaults
 
@@ -48,8 +49,9 @@ https://x.com/Predicti0r/status/2061791808158400570
 cd skills/polymarket-world-cup-player-goal-value
 
 python player_goal_value.py --config
-python player_goal_value.py            # dry run
-python player_goal_value.py --live     # live orders
+python player_goal_value.py --venue sim                  # dry run in $SIM venue
+python player_goal_value.py --venue sim --positions      # inspect open sim positions
+python player_goal_value.py --venue polymarket --live    # live orders on Polymarket
 ```
 
 ## Tune
@@ -68,6 +70,13 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
 - Designed for low-liquidity conditions where market chasing is penalized.
 - Start in dry-run/sim and adjust priors after collecting your own outcomes.
 
+## Bugfixes applied in v0.1.1
+
+- Added `--venue` support (`sim`, `polymarket`, `kalshi`) across client, context, positions, and trade calls.
+- Dry-run no longer writes to persistent `daily_spend.json` / `cooldown_state.json`.
+- Entry edge now compares against **ask** (`ask_yes`) instead of mid/current probability.
+- Removed pre-rounding of limit prices before trade submission; SDK handles normalization.
+
 ## Deterministic spec (Skill Builder style)
 
 ### Signal
@@ -75,7 +84,7 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
   - penalties, expected matches, minutes certainty, role centrality, mismatch upside
 
 ### Entry logic
-- Require `fair_yes - market_yes >= min_edge`
+- Require `fair_yes - ask_yes >= min_edge`
 - Build discounted limit ladder below fair value
 - Enter only when spread/slippage/cooldown/budget gates pass
 
