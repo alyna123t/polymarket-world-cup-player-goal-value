@@ -50,7 +50,7 @@ https://x.com/Predicti0r/status/2061791808158400570
 cd skills/polymarket-world-cup-player-goal-value
 
 # refresh multi-source player stats (Understat + FBref + openfootball + football-data)
-python scripts/fetch_understat_players.py --seasons 2024,2023,2022 --min-minutes 300
+python scripts/fetch_understat_players.py --seasons 2026,2025,2024 --min-minutes 300
 
 python player_goal_value.py --config
 python player_goal_value.py --venue sim                  # dry run in $SIM venue
@@ -71,6 +71,7 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
 ## Notes
 
 - Uses multi-source data: Understat + FBref (player stats) and openfootball + football-data (team attack context).
+- Latest season in `--seasons` is included only if upstream sources already expose player rows (e.g. 2026 may be empty pre-kickoff).
 - Unknown player markets are skipped instead of falling back to synthetic priors.
 - Designed for low-liquidity conditions where market chasing is penalized.
 - Start in dry-run/sim and tune `expected_tournament_matches`, `min_edge`, and minute filters after collecting outcomes.

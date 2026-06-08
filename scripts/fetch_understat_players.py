@@ -309,7 +309,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Build multi-source player dataset for WCPGV")
     ap.add_argument(
         "--seasons",
-        default="2024,2023,2022",
+        default="2026,2025,2024",
         help="Comma-separated recent seasons, newest first",
     )
     ap.add_argument("--min-minutes", type=int, default=300)
@@ -393,6 +393,7 @@ def main() -> int:
             "latest_season": -1,
             "sources": set(),
             "team_attack_index": 1.0,
+            "seasons": set(),
         }
     )
 
@@ -411,6 +412,7 @@ def main() -> int:
         a["npg"] += float(row["npg"]) * weight
         a["w_total"] += weight
         a["sources"].add(src)
+        a["seasons"].add(season)
 
         if season > a["latest_season"] or (season == a["latest_season"] and float(row["minutes"]) > a["latest_minutes"]):
             a["latest_season"] = season
@@ -452,7 +454,7 @@ def main() -> int:
                 "position": a["position"],
                 "team_title": a["team_title"],
                 "league": a["league"],
-                "season": ",".join(str(s) for s in seasons),
+                "season": ",".join(str(s) for s in sorted(a["seasons"], reverse=True)),
                 "source": "+".join(sorted(srcs)),
                 "team_attack_index": round(team_attack_index, 4),
             }
