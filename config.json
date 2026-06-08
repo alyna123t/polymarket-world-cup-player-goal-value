@@ -10,7 +10,9 @@
   "cooldown_hours": 24,
   "limit_offsets_cents": "8,5,3",
   "limit_splits": "0.25,0.35,0.40",
-  "player_data_file": "data/multi_source_players_recent_top5.csv",
+  "player_data_file": "data/understat_players_recent_top5.csv",
   "min_player_minutes": 450,
-  "expected_tournament_matches": 3.4
+  "expected_tournament_matches": 3.4,
+  "expected_single_market_matches": 1.0,
+  "expected_season_market_matches": 8.0
 }

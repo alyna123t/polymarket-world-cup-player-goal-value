@@ -1,16 +1,16 @@
 ---
 name: polymarket-world-cup-player-goal-value
-description: Trade FIFA World Cup “player to score at least once” markets using role/minutes/penalty/deep-run value scoring and patient limit orders.
+description: Trade Polymarket player-goal YES markets (World Cup + league + match props) using role/minutes/penalty/value scoring and patient limit orders.
 metadata:
   author: Alyna + Hermes
-  version: "0.1.3"
+  version: "0.1.5"
   displayName: Polymarket World Cup Player Goal Value
   difficulty: intermediate
 ---
 
-# Polymarket World Cup Player Goal Value
+# Polymarket Player Goal Value
 
-This skill implements a value framework for **World Cup player-goal YES markets** using real player-level scoring data.
+This skill implements a value framework for **player-goal YES markets** (World Cup + league + match-level props) using real player-level scoring data.
 
 It models fair value using:
 - real historical goals/90
@@ -25,8 +25,8 @@ https://x.com/Predicti0r/status/2061791808158400570
 
 ## What it does
 
-- Scans active World Cup player-goal markets from Simmer imports
-- Loads multi-source player data from `data/multi_source_players_recent_top5.csv`
+- Scans active player-goal markets from Simmer imports
+- Loads single-source player data from `data/understat_players_recent_top5.csv`
 - Converts player stats into fair `P(score >= 1)` with a Poisson model
 - **Skips unknown players** (no fallback guessing)
 - Uses **ask price** for edge checks (`fair - ask_yes >= min_edge`)
@@ -49,7 +49,7 @@ https://x.com/Predicti0r/status/2061791808158400570
 ```bash
 cd skills/polymarket-world-cup-player-goal-value
 
-# refresh multi-source player stats (Understat + FBref + openfootball + football-data)
+# refresh player stats from the free Understat connector
 python scripts/fetch_understat_players.py --seasons 2026,2025,2024 --min-minutes 300
 
 python player_goal_value.py --config
@@ -70,11 +70,11 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
 
 ## Notes
 
-- Uses multi-source data: Understat + FBref (player stats) and openfootball + football-data (team attack context).
+- Uses free Understat player data (top 5 leagues) for goals, non-penalty goals, minutes, and role.
 - Latest season in `--seasons` is included only if upstream sources already expose player rows (e.g. 2026 may be empty pre-kickoff).
 - Unknown player markets are skipped instead of falling back to synthetic priors.
 - Designed for low-liquidity conditions where market chasing is penalized.
-- Start in dry-run/sim and tune `expected_tournament_matches`, `min_edge`, and minute filters after collecting outcomes.
+- Start in dry-run/sim and tune `expected_tournament_matches`, `expected_single_market_matches`, `expected_season_market_matches`, `min_edge`, and minute filters after collecting outcomes.
 
 ## Bugfixes applied in v0.1.1
 

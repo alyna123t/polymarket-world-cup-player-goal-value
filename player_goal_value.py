@@ -43,9 +43,11 @@ CONFIG_SCHEMA = {
     "cooldown_hours": {"env": "SIMMER_WCPGV_COOLDOWN_H", "default": 24, "type": int, "help": "Per-market cooldown"},
     "limit_offsets_cents": {"env": "SIMMER_WCPGV_LIMIT_OFFSETS", "default": "8,5,3", "type": str, "help": "Entry ladder offsets from fair, cents"},
     "limit_splits": {"env": "SIMMER_WCPGV_LIMIT_SPLITS", "default": "0.25,0.35,0.40", "type": str, "help": "Allocation split per ladder rung"},
-    "player_data_file": {"env": "SIMMER_WCPGV_PLAYER_DATA_FILE", "default": "data/multi_source_players_recent_top5.csv", "type": str, "help": "CSV of real player stats"},
+    "player_data_file": {"env": "SIMMER_WCPGV_PLAYER_DATA_FILE", "default": "data/understat_players_recent_top5.csv", "type": str, "help": "CSV of real player stats"},
     "min_player_minutes": {"env": "SIMMER_WCPGV_MIN_PLAYER_MINUTES", "default": 450, "type": int, "help": "Skip players below this season-minute sample"},
-    "expected_tournament_matches": {"env": "SIMMER_WCPGV_EXPECTED_MATCHES", "default": 3.4, "type": float, "help": "Expected tournament matches for conversion to P(score>=1)"},
+    "expected_tournament_matches": {"env": "SIMMER_WCPGV_EXPECTED_MATCHES", "default": 3.4, "type": float, "help": "Expected matches for tournament-style markets (e.g., World Cup)"},
+    "expected_single_market_matches": {"env": "SIMMER_WCPGV_EXPECTED_SINGLE_MATCHES", "default": 1.0, "type": float, "help": "Expected matches for single-game scoring markets"},
+    "expected_season_market_matches": {"env": "SIMMER_WCPGV_EXPECTED_SEASON_MATCHES", "default": 8.0, "type": float, "help": "Expected remaining matches for season-long scoring props"},
 }
 
 _config = load_config(CONFIG_SCHEMA, __file__, slug="polymarket-world-cup-player-goal-value")
@@ -192,24 +194,40 @@ def lookup_player_data(player: str, data: Dict[str, dict]) -> Optional[dict]:
 
 def extract_player_name(question: str) -> str:
     q = question.strip()
-    # common pattern: "Will Lionel Messi score at least one goal ..."
-    m = re.match(r"\s*Will\s+(.+?)\s+score at least one goal", q, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    # fallback first chunk before "score"
-    m = re.match(r"\s*Will\s+(.+?)\s+score", q, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
+    patterns = [
+        r"\s*Will\s+(.+?)\s+score at least one goal",
+        r"\s*Will\s+(.+?)\s+score\b",
+        r"\s*Will\s+(.+?)\s+have\s+\d+\+?\s+goals?",
+        r"\s*Will\s+(.+?)\s+to\s+score\b",
+    ]
+    for pat in patterns:
+        m = re.match(pat, q, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
     return q[:80]
 
 
 def is_player_goal_market(question: str) -> bool:
+    q = question.strip().lower()
+    if not q.startswith("will "):
+        return False
+
+    if "score" in q and any(x in q for x in ["goal", "against", "this season", "in the match", "in this match"]):
+        return True
+    if re.search(r"\bhave\s+\d+\+?\s+goals?\b", q):
+        return True
+    if "to score" in q:
+        return True
+    return False
+
+
+def infer_expected_matches(question: str) -> float:
     q = question.lower()
-    return (
-        "world cup" in q
-        and "score at least one goal" in q
-        and q.startswith("will ")
-    )
+    if "world cup" in q or "euro" in q or "tournament" in q:
+        return float(_config["expected_tournament_matches"])
+    if "this season" in q or "season" in q:
+        return float(_config["expected_season_market_matches"])
+    return float(_config["expected_single_market_matches"])
 
 
 def get_player_data_path() -> Path:
@@ -285,12 +303,12 @@ def load_player_data() -> Dict[str, dict]:
     return out
 
 
-def estimate_fair_yes(player: str, pdata: dict) -> Tuple[float, dict]:
+def estimate_fair_yes(player: str, pdata: dict, question: str) -> Tuple[float, dict]:
     g90 = float(pdata["goals_per90"])
     exp_minutes = float(pdata["expected_minutes"])
     role_mult = float(pdata["role_multiplier"])
     team_attack_index = float(pdata.get("team_attack_index", 1.0) or 1.0)
-    expected_matches = float(_config["expected_tournament_matches"])
+    expected_matches = infer_expected_matches(question)
 
     # Non-penalty scoring base, then small add-on for known penalty contribution.
     base_lambda = g90 * (exp_minutes / 90.0) * expected_matches
@@ -305,7 +323,7 @@ def estimate_fair_yes(player: str, pdata: dict) -> Tuple[float, dict]:
         "expected_minutes": exp_minutes,
         "role_multiplier": role_mult,
         "penalty_goal_share": float(pdata["penalty_goal_share"]),
-        "expected_tournament_matches": expected_matches,
+        "expected_market_matches": expected_matches,
         "team_attack_index": team_attack_index,
     }
 
@@ -403,7 +421,7 @@ def run(
     cands = [m for m in markets if is_player_goal_market(m.question)]
 
     if not quiet:
-        print("⚽ World Cup Player Goal Value")
+        print("⚽ Player Goal Value")
         print(f"scanned={len(markets)} candidates={len(cands)}")
 
     try:
@@ -424,7 +442,7 @@ def run(
         if not pdata:
             skipped_unknown += 1
             continue
-        fair, model_inputs = estimate_fair_yes(player, pdata)
+        fair, model_inputs = estimate_fair_yes(player, pdata, m.question)
         scored.append((fair, player, m, pdata, model_inputs))
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -512,7 +530,7 @@ def run(
                         "expected_minutes": round(float(model_inputs["expected_minutes"]), 2),
                         "role_multiplier": round(float(model_inputs["role_multiplier"]), 5),
                         "penalty_goal_share": round(float(model_inputs["penalty_goal_share"]), 5),
-                        "expected_tournament_matches": round(float(model_inputs["expected_tournament_matches"]), 3),
+                        "expected_market_matches": round(float(model_inputs["expected_market_matches"]), 3),
                         "team_attack_index": round(float(model_inputs["team_attack_index"]), 5),
                         "lambda": round(float(model_inputs["lambda"]), 5),
                         "player_source": pdata.get("source", "understat"),
