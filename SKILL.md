@@ -3,7 +3,7 @@ name: polymarket-world-cup-player-goal-value
 description: Trade Polymarket player-goal YES markets (World Cup + league + match props) using role/minutes/penalty/value scoring and patient limit orders.
 metadata:
   author: Alyna + Hermes
-  version: "0.1.5"
+  version: "0.1.6"
   displayName: Polymarket World Cup Player Goal Value
   difficulty: intermediate
 ---
@@ -76,12 +76,13 @@ python player_goal_value.py --set limit_splits=0.2,0.3,0.5
 - Designed for low-liquidity conditions where market chasing is penalized.
 - Start in dry-run/sim and tune `expected_tournament_matches`, `expected_single_market_matches`, `expected_season_market_matches`, `min_edge`, and minute filters after collecting outcomes.
 
-## Bugfixes applied in v0.1.1
+## Bugfixes applied in v0.1.6
 
-- Added `--venue` support (`sim`, `polymarket`, `kalshi`) across client, context, positions, and trade calls.
-- Dry-run no longer writes to persistent `daily_spend.json` / `cooldown_state.json`.
-- Entry edge now compares against **ask** (`ask_yes`) instead of mid/current probability.
-- Removed pre-rounding of limit prices before trade submission; SDK handles normalization.
+- Added fallback discovery search via `/api/sdk/markets?q=...` and merged + deduped results with snapshot feed to recover missing player-goal candidates.
+- Added sim-only proxy quote option (`allow_proxy_price_in_sim_only`) so missing asks in `$SIM` no longer block all execution tests.
+- Fixed venue-specific trade payload: only send `price` + `GTC` on `polymarket`; `sim/kalshi` now submit supported market orders.
+- `--positions` now queries live account context so it reflects executed sim orders without requiring a separate `--live` flag.
+- Existing v0.1.1 fixes retained: venue plumbing, dry-run state isolation, ask-based edge checks, SDK-managed price normalization.
 
 ## Deterministic spec (Skill Builder style)
 

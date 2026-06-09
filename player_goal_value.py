@@ -21,9 +21,12 @@ import math
 import os
 import re
 import sys
+import urllib.parse
+import urllib.request
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 from simmer_sdk.skill import get_config_path, load_config, update_config
@@ -48,6 +51,7 @@ CONFIG_SCHEMA = {
     "expected_tournament_matches": {"env": "SIMMER_WCPGV_EXPECTED_MATCHES", "default": 3.4, "type": float, "help": "Expected matches for tournament-style markets (e.g., World Cup)"},
     "expected_single_market_matches": {"env": "SIMMER_WCPGV_EXPECTED_SINGLE_MATCHES", "default": 1.0, "type": float, "help": "Expected matches for single-game scoring markets"},
     "expected_season_market_matches": {"env": "SIMMER_WCPGV_EXPECTED_SEASON_MATCHES", "default": 8.0, "type": float, "help": "Expected remaining matches for season-long scoring props"},
+    "allow_proxy_price_in_sim_only": {"env": "SIMMER_WCPGV_ALLOW_PROXY_SIM", "default": True, "type": bool, "help": "When no ask quote is available, allow current-probability proxy pricing in sim venue only"},
 }
 
 _config = load_config(CONFIG_SCHEMA, __file__, slug="polymarket-world-cup-player-goal-value")
@@ -119,6 +123,75 @@ def get_positions(client, venue: str) -> List[dict]:
     except Exception as e:
         print(f"Error fetching positions: {e}")
         return []
+
+
+def api_market_search(query: str, limit: int) -> List[SimpleNamespace]:
+    """Direct API search for player-goal markets absent from snapshot feed."""
+    key = os.environ.get("SIMMER_API_KEY")
+    if not key:
+        return []
+
+    params = urllib.parse.urlencode(
+        {
+            "q": query,
+            "status": "active",
+            "venue": "polymarket",
+            "limit": max(1, min(limit, 1000)),
+        }
+    )
+    url = f"https://api.simmer.markets/api/sdk/markets?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return []
+
+    out: List[SimpleNamespace] = []
+    for m in (data.get("markets") or []):
+        if not isinstance(m, dict):
+            continue
+        out.append(
+            SimpleNamespace(
+                id=m.get("id"),
+                question=m.get("question", ""),
+                spread=m.get("spread"),
+                current_probability=m.get("current_probability"),
+            )
+        )
+    return out
+
+
+def discover_markets(client) -> List:
+    base_markets = client.get_markets(
+        status="active",
+        import_source=str(_config["import_source"]),
+        limit=int(_config["scan_limit"]),
+    )
+
+    queries = [
+        "score a goal at the 2026 FIFA World Cup",
+        "World Cup: Player to score",
+        "to Score 2+ Penalties",
+    ]
+
+    extra: List[SimpleNamespace] = []
+    for q in queries:
+        extra.extend(api_market_search(q, limit=int(_config["scan_limit"])))
+
+    merged = []
+    seen = set()
+    for m in list(base_markets) + extra:
+        mid = getattr(m, "id", None)
+        q = getattr(m, "question", "")
+        if not mid or not q or mid in seen:
+            continue
+        seen.add(mid)
+        merged.append(m)
+    return merged
 
 
 def check_context_safeguards(context: dict):
@@ -389,6 +462,31 @@ def get_yes_ask(ctx: dict, market_obj) -> Optional[float]:
     return None
 
 
+def get_proxy_yes_price(ctx: dict, market_obj) -> Optional[float]:
+    m = (ctx or {}).get("market") or {}
+    for key in ("current_probability", "current_price", "probability", "price_yes"):
+        try:
+            v = m.get(key, None)
+            if v is not None:
+                fv = float(v)
+                if 0.0 < fv < 1.0:
+                    return fv
+        except Exception:
+            pass
+
+    for attr in ("current_probability", "current_price", "probability", "price_yes"):
+        try:
+            v = getattr(market_obj, attr, None)
+            if v is not None:
+                fv = float(v)
+                if 0.0 < fv < 1.0:
+                    return fv
+        except Exception:
+            pass
+
+    return None
+
+
 def run(
     live: bool,
     venue: str,
@@ -412,11 +510,7 @@ def run(
         print("Invalid ladder config: offsets/splits mismatch or splits not summing to 1.0")
         return 2
 
-    markets = client.get_markets(
-        status="active",
-        import_source=str(_config["import_source"]),
-        limit=int(_config["scan_limit"]),
-    )
+    markets = discover_markets(client)
 
     cands = [m for m in markets if is_player_goal_market(m.question)]
 
@@ -465,9 +559,16 @@ def run(
         ctx = client.get_market_context(mid, venue=venue) or {}
         ask_yes = get_yes_ask(ctx, m)
         if ask_yes is None:
-            if not quiet:
-                print(f"skip-no-ask: {m.question[:72]}...")
-            continue
+            allow_proxy = bool(_config.get("allow_proxy_price_in_sim_only", True)) and venue == "sim"
+            if allow_proxy:
+                ask_yes = get_proxy_yes_price(ctx, m)
+                if ask_yes is not None:
+                    if not quiet:
+                        print(f"proxy-ask-used(sim): {m.question[:72]}... ask≈{ask_yes:.3f}")
+            if ask_yes is None:
+                if not quiet:
+                    print(f"skip-no-ask: {m.question[:72]}...")
+                continue
         edge = fair - ask_yes
         if edge < float(_config["min_edge"]):
             continue
@@ -506,38 +607,46 @@ def run(
             )
 
             if live:
-                res = client.trade(
-                    market_id=mid,
-                    side="yes",
-                    amount=amt,
-                    action="buy",
-                    venue=venue,
-                    order_type="GTC",
-                    price=px,
-                    reasoning=note,
-                    source=TRADE_SOURCE,
-                    skill_slug=SKILL_SLUG,
-                    allow_rebuy=False,
-                    signal_data={
-                        "player": player,
-                        "fair_yes": round(fair, 5),
-                        "ask_yes": round(ask_yes, 5),
-                        "edge": round(edge, 5),
-                        "spread": None if spread is None else round(spread, 5),
-                        "slippage_pct": round(slip, 5),
-                        "entry_price": px,
-                        "goals_per90": round(float(model_inputs["goals_per90"]), 5),
-                        "expected_minutes": round(float(model_inputs["expected_minutes"]), 2),
-                        "role_multiplier": round(float(model_inputs["role_multiplier"]), 5),
-                        "penalty_goal_share": round(float(model_inputs["penalty_goal_share"]), 5),
-                        "expected_market_matches": round(float(model_inputs["expected_market_matches"]), 3),
-                        "team_attack_index": round(float(model_inputs["team_attack_index"]), 5),
-                        "lambda": round(float(model_inputs["lambda"]), 5),
-                        "player_source": pdata.get("source", "understat"),
-                        "player_league": pdata.get("league", ""),
-                        "player_team": pdata.get("team", ""),
-                    },
-                )
+                signal_data = {
+                    "player": player,
+                    "fair_yes": round(fair, 5),
+                    "ask_yes": round(ask_yes, 5),
+                    "edge": round(edge, 5),
+                    "spread": None if spread is None else round(spread, 5),
+                    "slippage_pct": round(slip, 5),
+                    "entry_price": px,
+                    "goals_per90": round(float(model_inputs["goals_per90"]), 5),
+                    "expected_minutes": round(float(model_inputs["expected_minutes"]), 2),
+                    "role_multiplier": round(float(model_inputs["role_multiplier"]), 5),
+                    "penalty_goal_share": round(float(model_inputs["penalty_goal_share"]), 5),
+                    "expected_market_matches": round(float(model_inputs["expected_market_matches"]), 3),
+                    "team_attack_index": round(float(model_inputs["team_attack_index"]), 5),
+                    "lambda": round(float(model_inputs["lambda"]), 5),
+                    "player_source": pdata.get("source", "understat"),
+                    "player_league": pdata.get("league", ""),
+                    "player_team": pdata.get("team", ""),
+                }
+
+                trade_kwargs = {
+                    "market_id": mid,
+                    "side": "yes",
+                    "amount": amt,
+                    "action": "buy",
+                    "venue": venue,
+                    "reasoning": note,
+                    "source": TRADE_SOURCE,
+                    "skill_slug": SKILL_SLUG,
+                    "allow_rebuy": False,
+                    "signal_data": signal_data,
+                }
+
+                # Sim/Kalshi venues don't accept explicit price in SDK trade().
+                # Keep GTC/price only for Polymarket.
+                if venue == "polymarket":
+                    trade_kwargs["order_type"] = "GTC"
+                    trade_kwargs["price"] = px
+
+                res = client.trade(**trade_kwargs)
                 ok = bool(getattr(res, "success", False))
                 oid = getattr(res, "order_id", None)
             else:
@@ -622,7 +731,9 @@ def main() -> int:
         return 0
 
     return run(
-        live=args.live,
+        # positions-only mode should query the same account context as live reads,
+        # otherwise `--positions` can look empty after successful live sim orders.
+        live=(args.live or args.positions),
         venue=args.venue,
         quiet=args.quiet,
         positions_only=args.positions,
